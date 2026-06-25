@@ -3,25 +3,14 @@
 # SPDX - License - Identifier: BSD - 2 - Clause - Patent
 #
 
-# Common/ASM_AVX2 Directory CMakeLists.txt
-
-# Include Common Subdirectories
-include_directories(
-    ${PROJECT_SOURCE_DIR}/Source/API/
-    ${PROJECT_SOURCE_DIR}/Source/Lib/Common/Codec/
-    ${PROJECT_SOURCE_DIR}/Source/Lib/Common/ASM_SSE2/
-    ${PROJECT_SOURCE_DIR}/Source/Lib/Common/ASM_AVX2/
-    )
-
-check_both_flags_add(-mavx2)
-
-if(MSVC)
-    check_both_flags_add(/arch:AVX2)
-endif()
-
-file(GLOB all_files
-    "*.h"
-    "*.asm"
-    "*.c")
+file(GLOB all_files CONFIGURE_DEPENDS "*.h" "*.c" "*.asm")
 
 add_library(COMMON_ASM_AVX2 OBJECT ${all_files})
+
+target_include_directories(COMMON_ASM_AVX2 PRIVATE
+    ${PROJECT_SOURCE_DIR}/Source/API
+    ${PROJECT_SOURCE_DIR}/Source/Lib/Common/Codec
+    ${PROJECT_SOURCE_DIR}/Source/Lib/Common/ASM_SSE2
+    ${PROJECT_SOURCE_DIR}/Source/Lib/Common/ASM_AVX2)
+
+target_compile_options(COMMON_ASM_AVX2 PRIVATE -mavx2)

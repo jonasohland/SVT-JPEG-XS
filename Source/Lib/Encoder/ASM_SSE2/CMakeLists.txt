@@ -3,23 +3,11 @@
 # SPDX - License - Identifier: BSD - 2 - Clause - Patent
 #
 
-# ASM_SSE2 Directory CMakeLists.txt
-
-# Include Encoder Subdirectories
-include_directories(
-    ${PROJECT_SOURCE_DIR}/Source/Lib/Common/ASM_SSE2/
-    )
-
-check_both_flags_add(-msse2)
-
-file(GLOB all_files
-    "*.h"
-    "*.c")
-
-set(asm_files
-    ASM_SSE2.asm
-    )
+file(GLOB all_files CONFIGURE_DEPENDS "*.h" "*.c" "*.asm")
 
 add_library(ENCODER_ASM_SSE2 OBJECT ${all_files})
 
-asm_compile_to_target(ENCODER_ASM_SSE2 ${asm_files})
+target_include_directories(ENCODER_ASM_SSE2 PRIVATE
+    ${PROJECT_SOURCE_DIR}/Source/Lib/Common/ASM_SSE2)
+
+target_compile_options(ENCODER_ASM_SSE2 PRIVATE $<$<COMPILE_LANGUAGE:C>:-msse2>)
