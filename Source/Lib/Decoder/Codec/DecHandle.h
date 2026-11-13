@@ -137,6 +137,16 @@ typedef struct svt_jpeg_xs_decoder_api_prv {
     * Holds the required data to properly schedule subsequent slices for processing
     */
     svt_jpeg_xs_slice_scheduler_ctx_t slice_scheduler_ctx;
+
+    /*
+     * Inline mode (builds without threads, SVT_JXS_NO_THREADS): no stage threads and no
+     * init/universal/final queues. svt_jpeg_xs_decoder_send_frame() decodes the frame on the
+     * calling thread and posts the result to the output queue.
+     */
+    uint8_t inline_mode;
+    ObjectWrapper_t* inline_decoder_ctx_wrapper;
+    svt_jpeg_xs_decoder_thread_context* inline_thread_context;
+    uint64_t inline_frame_num;
 } svt_jpeg_xs_decoder_api_prv_t;
 
 #ifdef __cplusplus

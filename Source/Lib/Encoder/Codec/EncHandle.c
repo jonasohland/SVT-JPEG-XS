@@ -631,6 +631,10 @@ PREFIX_API SvtJxsErrorType_t svt_jpeg_xs_encoder_init(uint64_t version_api_major
         return SvtJxsErrorBadParameter;
     }
     enc_api->private_ptr = NULL;
+#ifdef SVT_JXS_NO_THREADS
+    /*The encoder pipeline needs threads.*/
+    return SvtJxsErrorUndefined;
+#endif
     svt_jxs_log_init();
     // Init Component OS objects (threads, semaphores, etc.)
     // also links the various Component control functions

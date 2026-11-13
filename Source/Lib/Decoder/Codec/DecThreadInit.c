@@ -130,6 +130,100 @@ static int32_t get_slice_size(pi_t* pi, const uint8_t* bitstream_buf, size_t bit
     return SvtJxsErrorDecoderInvalidBitstream;
 }
 
+/* Find the size of slice `slice` starting at `offset` in a whole-frame bitstream and advance
+ * `offset` past it. After the last slice, also check for the EOC marker. */
+static int32_t get_frame_slice_size(svt_jpeg_xs_decoder_api_prv_t* dec_api_prv, svt_jpeg_xs_decoder_instance_t* dec_ctx,
+                                    const svt_jpeg_xs_bitstream_buffer_t* bitstream, uint32_t slice, uint32_t* offset) {
+    pi_t* pi = &dec_ctx->dec_common->pi;
+    uint32_t out_slice_size;
+    int32_t ret = get_slice_size(pi, bitstream->buffer + *offset, bitstream->used_size - *offset, slice, &out_slice_size);
+    if (ret) {
+        return ret;
+    }
+    *offset += out_slice_size;
+    if (slice + 1 == pi->slice_num) {
+        if (*offset + 1 < bitstream->used_size) {
+            uint16_t val = get_16_bits(bitstream->buffer + *offset);
+            if (val != CODESTREAM_EOC) {
+                ret = SvtJxsErrorDecoderInvalidBitstream;
+            }
+        }
+        else {
+            ret = SvtJxsErrorDecoderBitstreamTooShort;
+        }
+        if (!ret) {
+            uint32_t frame_bitstream_size = *offset + 2;
+
+            if (dec_ctx->picture_header_dynamic.hdr_Lcod != 0 && dec_ctx->picture_header_dynamic.hdr_Lcod != frame_bitstream_size) {
+                if (dec_api_prv->verbose >= VERBOSE_ERRORS) {
+                    fprintf(stderr,
+                            "Warning: Frame decoded but may be broken! Decoded different stream size than expected from "
+                            "header get=%u, expected=%u\n",
+                            frame_bitstream_size,
+                            dec_ctx->picture_header_dynamic.hdr_Lcod);
+                }
+            }
+        }
+    }
+    return ret;
+}
+
+/* Inline mode: the work of the init, universal and final stage kernels for one frame, as a single
+ * universal thread would do it, on the calling thread. Slices are decoded in order and each
+ * slice's overlap IDWT runs right after it, so the output equals the threaded decoder's. On error,
+ * the error of the first failing slice is returned, like the final stage reports it. */
+SvtJxsErrorType_t decode_frame_inline(svt_jpeg_xs_decoder_api_prv_t* dec_api_prv, svt_jpeg_xs_frame_t* frame) {
+    svt_jpeg_xs_decoder_instance_t* dec_ctx = dec_api_prv->inline_decoder_ctx_wrapper->object_ptr;
+    pi_t* pi = &dec_ctx->dec_common->pi;
+    svt_jpeg_xs_image_buffer_t* image = &frame->image;
+
+    dec_ctx->frame_num = dec_api_prv->inline_frame_num++;
+    dec_ctx->dec_input = *frame;
+    dec_ctx->sync_slices_idwt = 0;
+
+    uint32_t header_size = 0;
+    SvtJxsErrorType_t ret = svt_jpeg_xs_decode_header(
+        dec_ctx, frame->bitstream.buffer, frame->bitstream.used_size, &header_size, dec_api_prv->verbose);
+    if (ret) {
+        if (dec_api_prv->verbose >= VERBOSE_ERRORS) {
+            fprintf(stderr, "[%s] Invalid Header frame: %i\n", __FUNCTION__, (int)dec_ctx->frame_num);
+        }
+        return ret;
+    }
+
+    uint32_t offset = header_size;
+    for (uint32_t slice = 0; slice < pi->slice_num; slice++) {
+        const uint8_t* slice_buf = frame->bitstream.buffer + offset;
+        size_t slice_buf_size = frame->bitstream.used_size - offset;
+        ret = get_frame_slice_size(dec_api_prv, dec_ctx, &frame->bitstream, slice, &offset);
+        if (ret) {
+            return ret;
+        }
+        uint32_t out_slice_size;
+        ret = svt_jpeg_xs_decode_slice(dec_ctx,
+                                       dec_api_prv->inline_thread_context,
+                                       slice_buf,
+                                       slice_buf_size,
+                                       slice,
+                                       &out_slice_size,
+                                       image,
+                                       dec_api_prv->verbose);
+        if (ret < 0) {
+            return ret;
+        }
+        /*IDWT between slices*/
+        ret = svt_jpeg_xs_decode_final_slice_overlap(dec_ctx, image, slice);
+        if (ret) {
+            return ret;
+        }
+    }
+
+    if (dec_ctx->dec_common->picture_header_const.hdr_Cpih) {
+        ret = svt_jpeg_xs_decode_final(dec_ctx, image);
+    }
+    return ret;
+}
+
 static void send_slices_tasks(svt_jpeg_xs_decoder_api_prv_t* dec_api_prv, TaskInputBitstream* input_buffer_ptr,
                               ObjectWrapper_t* wrapper_ptr_decoder_ctx, svt_jpeg_xs_image_buffer_t* image_buffer,
                               uint32_t header_size) {
@@ -158,39 +252,8 @@ static void send_slices_tasks(svt_jpeg_xs_decoder_api_prv_t* dec_api_prv, TaskIn
         buffer_output->bitstream_buf = input_buffer_ptr->dec_input.bitstream.buffer + offset;
         buffer_output->bitstream_buf_size = input_buffer_ptr->dec_input.bitstream.used_size - offset;
         buffer_output->slice_id = slice;
-        uint32_t frame_bitstream_size = header_size;
 
-        uint32_t out_slice_size;
-        int32_t ret = get_slice_size(
-            &dec_ctx->dec_common->pi, buffer_output->bitstream_buf, buffer_output->bitstream_buf_size, slice, &out_slice_size);
-        if (!ret) {
-            offset += out_slice_size;
-            if (slice + 1 == pi->slice_num) {
-                if (offset + 1 < input_buffer_ptr->dec_input.bitstream.used_size) {
-                    uint16_t val = get_16_bits(input_buffer_ptr->dec_input.bitstream.buffer + offset);
-                    if (val != CODESTREAM_EOC) {
-                        ret = SvtJxsErrorDecoderInvalidBitstream;
-                    }
-                }
-                else {
-                    ret = SvtJxsErrorDecoderBitstreamTooShort;
-                }
-                if (!ret) {
-                    frame_bitstream_size = offset + 2;
-
-                    if (dec_ctx->picture_header_dynamic.hdr_Lcod != 0 &&
-                        dec_ctx->picture_header_dynamic.hdr_Lcod != frame_bitstream_size) {
-                        if (dec_api_prv->verbose >= VERBOSE_ERRORS) {
-                            fprintf(stderr,
-                                    "Warning: Frame decoded but may be broken! Decoded different stream size than expected from "
-                                    "header get=%u, expected=%u\n",
-                                    frame_bitstream_size,
-                                    dec_ctx->picture_header_dynamic.hdr_Lcod);
-                        }
-                    }
-                }
-            }
-        }
+        int32_t ret = get_frame_slice_size(dec_api_prv, dec_ctx, &input_buffer_ptr->dec_input.bitstream, slice, &offset);
 
         buffer_output->frame_error = ret;
         if (ret) {

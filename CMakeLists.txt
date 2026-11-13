@@ -39,8 +39,15 @@ endif()
 option(ENABLE_X86_ASM "Build x86 SIMD kernels (requires nasm/yasm)" ${ENABLE_X86_ASM_DEFAULT})
 message(STATUS "ENABLE_X86_ASM: ${ENABLE_X86_ASM}")
 
-if(EMSCRIPTEN)
-    # The codec always runs its pipeline stages on threads.
+# Without threads, the decoder runs its pipeline stages inline on the calling
+# thread (one frame per svt_jpeg_xs_decoder_send_frame(); frame mode only). The
+# encoder is not available in such builds. Under Emscripten this drops -pthread,
+# so the module runs on pages without SharedArrayBuffer.
+option(ENABLE_THREADS "Run the codec pipeline stages on threads" ON)
+message(STATUS "ENABLE_THREADS: ${ENABLE_THREADS}")
+if(NOT ENABLE_THREADS)
+    add_compile_definitions(SVT_JXS_NO_THREADS=1)
+elseif(EMSCRIPTEN)
     add_compile_options(-pthread)
     add_link_options(-pthread)
 endif()
@@ -379,6 +386,10 @@ endif()
 
 # Add Subdirectories
 add_subdirectory(Source/Lib)
+
+if(BUILD_APPS AND NOT ENABLE_THREADS)
+    message(FATAL_ERROR "The sample apps need threads (ENABLE_THREADS=ON)")
+endif()
 
 if(BUILD_APPS)
     if(EMSCRIPTEN)

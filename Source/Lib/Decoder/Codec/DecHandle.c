@@ -56,9 +56,14 @@ PREFIX_API void svt_jpeg_xs_decoder_close(svt_jpeg_xs_decoder_api_t* dec_api) {
             SVT_DELETE_PTR_ARRAY(dec_api_prv->universal_stage_context_ptr_array, dec_api_prv->universal_threads_num);
 
             SVT_DELETE(dec_api_prv->internal_pool_decoder_instance_resource_ptr);
+            if (dec_api_prv->inline_thread_context) {
+                svt_jpeg_xs_dec_thread_context_free(dec_api_prv->inline_thread_context, &dec_api_prv->dec_common.pi);
+            }
 
-            SVT_FREE(dec_api_prv->sync_output_ringbuffer);
-            svt_jxs_free_cond_var(&dec_api_prv->sync_output_ringbuffer_left);
+            if (dec_api_prv->sync_output_ringbuffer) {
+                SVT_FREE(dec_api_prv->sync_output_ringbuffer);
+                svt_jxs_free_cond_var(&dec_api_prv->sync_output_ringbuffer_left);
+            }
 
             for (uint32_t c = 0; c < MAX_COMPONENTS_NUM; c++) {
                 SVT_FREE(dec_api_prv->dec_common.buffer_tmp_cpih[c]);
@@ -100,6 +105,72 @@ SvtJxsErrorType_t decoder_allocate_handle(svt_jpeg_xs_decoder_api_t* dec_api) {
 
     SVT_CALLOC(dec_api->private_ptr, 1, sizeof(svt_jpeg_xs_decoder_api_prv_t));
 
+    return SvtJxsErrorNone;
+}
+
+/* Inline mode: one decoder instance, one slice context and the output queue; no threads. */
+static SvtJxsErrorType_t decoder_init_inline(svt_jpeg_xs_decoder_api_prv_t* dec_api_prv) {
+    const uint32_t output_queue_count = 10;
+    SvtJxsErrorType_t ret;
+
+    SVT_NEW(dec_api_prv->output_buffer_resource_ptr,
+            svt_jxs_system_resource_ctor,
+            output_queue_count,
+            1,
+            1,
+            output_frame_creator,
+            NULL,
+            output_frame_destroyer);
+    dec_api_prv->output_producer_fifo_ptr = svt_jxs_system_resource_get_producer_fifo(dec_api_prv->output_buffer_resource_ptr, 0);
+    dec_api_prv->output_consumer_fifo_ptr = svt_jxs_system_resource_get_consumer_fifo(dec_api_prv->output_buffer_resource_ptr, 0);
+
+    SVT_NEW(dec_api_prv->internal_pool_decoder_instance_resource_ptr,
+            svt_jxs_system_resource_ctor,
+            1,
+            1,
+            0,
+            pool_decoder_instance_create_ctor,
+            dec_api_prv,
+            pool_decoder_instance_destroy_ctor);
+    dec_api_prv->internal_pool_decoder_instance_fifo_ptr = svt_jxs_system_resource_get_producer_fifo(
+        dec_api_prv->internal_pool_decoder_instance_resource_ptr, 0);
+    ret = svt_jxs_get_empty_object_non_blocking(dec_api_prv->internal_pool_decoder_instance_fifo_ptr,
+                                                &dec_api_prv->inline_decoder_ctx_wrapper);
+    if (ret != SvtJxsErrorNone || dec_api_prv->inline_decoder_ctx_wrapper == NULL) {
+        return SvtJxsErrorDecoderInternal;
+    }
+
+    dec_api_prv->inline_thread_context = svt_jpeg_xs_dec_thread_context_alloc(&dec_api_prv->dec_common.pi);
+    if (dec_api_prv->inline_thread_context == NULL) {
+        return SvtJxsErrorInsufficientResources;
+    }
+
+    if (dec_api_prv->callback_send_data_available) {
+        dec_api_prv->callback_send_data_available(dec_api_prv->callback_decoder_ctx,
+                                                  dec_api_prv->callback_send_data_available_context);
+    }
+    return SvtJxsErrorNone;
+}
+
+/* Inline mode: put a finished frame (or EOC) into the output queue. */
+static SvtJxsErrorType_t post_output_inline(svt_jpeg_xs_decoder_api_prv_t* dec_api_prv, ObjectWrapper_t* output_wrapper_ptr,
+                                            const svt_jpeg_xs_frame_t* frame, uint64_t frame_num, SvtJxsErrorType_t frame_error) {
+    TaskOutFrame* buffer_output = (TaskOutFrame*)output_wrapper_ptr->object_ptr;
+    buffer_output->frame_num = frame_num;
+    buffer_output->dec_input = *frame;
+    buffer_output->dec_input.bitstream.ready_to_release = 1;
+    buffer_output->dec_input.image.ready_to_release = 1;
+    buffer_output->frame_error = frame_error;
+    svt_jxs_post_full_object(output_wrapper_ptr);
+
+    if (dec_api_prv->callback_send_data_available) {
+        dec_api_prv->callback_send_data_available(dec_api_prv->callback_decoder_ctx,
+                                                  dec_api_prv->callback_send_data_available_context);
+    }
+    if (dec_api_prv->callback_get_data_available) {
+        dec_api_prv->callback_get_data_available(dec_api_prv->callback_decoder_ctx,
+                                                 dec_api_prv->callback_get_data_available_context);
+    }
     return SvtJxsErrorNone;
 }
 
@@ -147,6 +218,17 @@ PREFIX_API SvtJxsErrorType_t svt_jpeg_xs_decoder_init(uint64_t version_api_major
         return SvtJxsErrorBadParameter;
     }
     dec_api_prv->proxy_mode = dec_api->proxy_mode;
+
+#ifdef SVT_JXS_NO_THREADS
+    dec_api_prv->inline_mode = 1;
+#endif
+    if (dec_api_prv->inline_mode && dec_api_prv->packetization_mode) {
+        if (dec_api->verbose >= VERBOSE_ERRORS) {
+            fprintf(stderr, "Packetization mode not supported in builds without threads\n");
+        }
+        svt_jpeg_xs_decoder_close(dec_api);
+        return SvtJxsErrorBadParameter;
+    }
 
     const CPU_FLAGS cpu_flags = get_cpu_flags();
     dec_api->use_cpu_flags &= cpu_flags;
@@ -233,6 +315,14 @@ PREFIX_API SvtJxsErrorType_t svt_jpeg_xs_decoder_init(uint64_t version_api_major
                 "SVT [config]: DecoderBitDepth / DecoderColorFormat\t: %d / %s\n",
                 dec_api_prv->dec_common.picture_header_const.hdr_bit_depth[0],
                 color_format_name);
+    }
+
+    if (dec_api_prv->inline_mode) {
+        ret = decoder_init_inline(dec_api_prv);
+        if (ret) {
+            svt_jpeg_xs_decoder_close(dec_api);
+        }
+        return ret;
     }
 
     if (dec_api->threads_num <= 2) {
@@ -400,6 +490,18 @@ PREFIX_API SvtJxsErrorType_t svt_jpeg_xs_decoder_send_frame(svt_jpeg_xs_decoder_
         }
     }
 
+    if (dec_api_prv->inline_mode) {
+        /*Nothing would ever drain a full output queue, so never block.*/
+        ObjectWrapper_t* output_wrapper_ptr = NULL;
+        svt_jxs_get_empty_object_non_blocking(dec_api_prv->output_producer_fifo_ptr, &output_wrapper_ptr);
+        if (output_wrapper_ptr == NULL) {
+            return SvtJxsErrorNoErrorEmptyQueue; //Queue is full, call svt_jpeg_xs_decoder_get_frame() first
+        }
+        uint64_t frame_num = dec_api_prv->inline_frame_num;
+        SvtJxsErrorType_t frame_error = decode_frame_inline(dec_api_prv, dec_input);
+        return post_output_inline(dec_api_prv, output_wrapper_ptr, dec_input, frame_num, frame_error);
+    }
+
     ObjectWrapper_t* input_wrapper_ptr;
     SvtJxsErrorType_t ret = SvtJxsErrorNone;
     if (blocking_flag) {
@@ -440,7 +542,8 @@ PREFIX_API SvtJxsErrorType_t svt_jpeg_xs_decoder_get_frame(svt_jpeg_xs_decoder_a
 
     svt_jpeg_xs_decoder_api_prv_t* dec_api_prv = (svt_jpeg_xs_decoder_api_prv_t*)dec_api->private_ptr;
     ObjectWrapper_t* wrapper_ptr = NULL;
-    if (blocking_flag) {
+    /*Inline mode: frames are finished in send, so waiting could never succeed.*/
+    if (blocking_flag && !dec_api_prv->inline_mode) {
         svt_jxs_get_full_object(dec_api_prv->output_consumer_fifo_ptr, &wrapper_ptr);
     }
     else {
@@ -469,6 +572,18 @@ PREFIX_API SvtJxsErrorType_t svt_jpeg_xs_decoder_send_eoc(svt_jpeg_xs_decoder_ap
     }
 
     svt_jpeg_xs_decoder_api_prv_t* dec_api_prv = (svt_jpeg_xs_decoder_api_prv_t*)dec_api->private_ptr;
+
+    if (dec_api_prv->inline_mode) {
+        ObjectWrapper_t* output_wrapper_ptr = NULL;
+        svt_jxs_get_empty_object_non_blocking(dec_api_prv->output_producer_fifo_ptr, &output_wrapper_ptr);
+        if (output_wrapper_ptr == NULL) {
+            return SvtJxsErrorNoErrorEmptyQueue;
+        }
+        svt_jpeg_xs_frame_t eoc;
+        memset(&eoc, 0, sizeof(eoc));
+        return post_output_inline(
+            dec_api_prv, output_wrapper_ptr, &eoc, dec_api_prv->inline_frame_num++, SvtJxsDecoderEndOfCodestream);
+    }
 
     if (dec_api_prv->packetization_mode) {
         ObjectWrapper_t* wrapper_ptr_decoder_ctx = NULL;

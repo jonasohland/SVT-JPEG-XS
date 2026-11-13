@@ -66,7 +66,11 @@ void printfTime(const char *fmt, ...) {
 Handle_t svt_jxs_create_thread(void *(*thread_function)(void *), void *thread_context) {
     Handle_t thread_handle = NULL;
 
-#ifdef _WIN32
+#if defined(SVT_JXS_NO_THREADS)
+    (void)thread_function;
+    (void)thread_context;
+    SVT_ERROR("Threads are not available in this build\n");
+#elif defined(_WIN32)
 
 #if defined(__GNUC__)
 #pragma GCC diagnostic push

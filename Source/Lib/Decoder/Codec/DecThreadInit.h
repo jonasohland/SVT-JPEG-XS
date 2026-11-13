@@ -21,6 +21,9 @@ void* thread_init_stage_kernel(void* input_ptr);
 SvtJxsErrorType_t input_bitstream_creator(void_ptr* object_dbl_ptr, void_ptr object_init_data_ptr);
 void input_bitstream_destroyer(void_ptr p);
 
+/*Inline mode: decode one frame on the calling thread. Returns the frame error.*/
+SvtJxsErrorType_t decode_frame_inline(svt_jpeg_xs_decoder_api_prv_t* dec_api_prv, svt_jpeg_xs_frame_t* frame);
+
 SvtJxsErrorType_t internal_svt_jpeg_xs_decoder_send_packet(svt_jpeg_xs_decoder_api_prv_t* dec_api_prv,
                                                            svt_jpeg_xs_frame_t* dec_input, uint32_t* bytes_used);
 
