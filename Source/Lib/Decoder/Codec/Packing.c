@@ -38,34 +38,56 @@ static INLINE uint32_t vlc_reader_end(vlc_reader_t* vlc_reader, bitstream_reader
     return vlc_reader->bits_used;
 }
 
-static INLINE int8_t vlc_reader_get_next_value(vlc_reader_t* vlc_reader) {
-    if (!(vlc_reader->register64 >> 32)) { //Because can not be more than 32 bits for test
+/* Number of leading zero bits of a non-zero 32-bit value. A builtin instead of
+ * the svt_log2_32 function pointer: this runs once per VLC symbol. */
+static INLINE uint32_t clz32_nonzero(uint32_t x) {
+    assert(x != 0);
+#if defined(__GNUC__) || defined(__clang__)
+    return (uint32_t)__builtin_clz(x);
+#else
+    return 31 - svt_log2_32(x);
+#endif
+}
+
+/* Appends 32 + n * 16 bits to the register (until more than 48 bits are
+ * valid). Needs register_bits <= 32 and bits_to_use >= bits_used + 64. */
+static FORCE_INLINE void vlc_reader_load(vlc_reader_t* vlc_reader) {
+    //Load 32
+    vlc_reader->register64 |= ((uint64_t)((uint32_t)~(
+                                  (((uint32_t)vlc_reader->mem[0]) << 24) | (((uint32_t)vlc_reader->mem[1]) << 16) |
+                                  (((uint32_t)vlc_reader->mem[2]) << 8) | ((uint32_t)vlc_reader->mem[3]))))
+        << (32 - vlc_reader->register_bits);
+    /*const __m128i shuffle_mask = _mm_setr_epi8(3, 2, 1, 0, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255);
+    __m128i val_128 = _mm_cvtsi32_si128(*(int32_t*)mem);
+    val_128 = _mm_shuffle_epi8(val_128, shuffle_mask);
+    val_128 = _mm_xor_si128(val_128, _mm_set1_epi32(-1));
+    uint32_t val = _mm_cvtsi128_si32(val_128);
+    val64 = val64 << 32 | val;
+    */
+    vlc_reader->mem += 4;
+    vlc_reader->register_bits += 32;
+
+    while (vlc_reader->register_bits <= 48) {
+        //Load 16
+        //vlc_reader->register64 |= ((uint64_t)((~((((uint32_t)vlc_reader->mem[0]) << 8) | (((uint32_t)vlc_reader->mem[1])))) & 0xFFFF)) << (48 - vlc_reader->register_bits);
+        vlc_reader->register64 |=
+            ((uint64_t)((uint16_t)(~((((uint16_t)vlc_reader->mem[0]) << 8) | (((uint16_t)vlc_reader->mem[1]))))))
+            << (48 - vlc_reader->register_bits);
+        vlc_reader->mem += 2;
+        vlc_reader->register_bits += 16;
+    }
+}
+
+/* Refills the register: the rare path of vlc_reader_get_next_value(), kept out
+ * of line so that the common path can be inlined. Takes and returns the reader
+ * by value so that the caller's reader doesn't escape and can stay in
+ * registers (in wasm, address-taken locals live in linear memory). */
+static NOINLINE vlc_reader_t vlc_reader_refill(vlc_reader_t reader) {
+    vlc_reader_t* vlc_reader = &reader;
+    {
         if (vlc_reader->register_bits <= 32) {
             if (vlc_reader->bits_to_use >= vlc_reader->bits_used + 64) {
-                //Load 32
-                vlc_reader->register64 |= ((uint64_t)((uint32_t)~(
-                                              (((uint32_t)vlc_reader->mem[0]) << 24) | (((uint32_t)vlc_reader->mem[1]) << 16) |
-                                              (((uint32_t)vlc_reader->mem[2]) << 8) | ((uint32_t)vlc_reader->mem[3]))))
-                    << (32 - vlc_reader->register_bits);
-                /*const __m128i shuffle_mask = _mm_setr_epi8(3, 2, 1, 0, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255);
-                __m128i val_128 = _mm_cvtsi32_si128(*(int32_t*)mem);
-                val_128 = _mm_shuffle_epi8(val_128, shuffle_mask);
-                val_128 = _mm_xor_si128(val_128, _mm_set1_epi32(-1));
-                uint32_t val = _mm_cvtsi128_si32(val_128);
-                val64 = val64 << 32 | val;
-                */
-                vlc_reader->mem += 4;
-                vlc_reader->register_bits += 32;
-
-                while (vlc_reader->register_bits <= 48) {
-                    //Load 16
-                    //vlc_reader->register64 |= ((uint64_t)((~((((uint32_t)vlc_reader->mem[0]) << 8) | (((uint32_t)vlc_reader->mem[1])))) & 0xFFFF)) << (48 - vlc_reader->register_bits);
-                    vlc_reader->register64 |=
-                        ((uint64_t)((uint16_t)(~((((uint16_t)vlc_reader->mem[0]) << 8) | (((uint16_t)vlc_reader->mem[1]))))))
-                        << (48 - vlc_reader->register_bits);
-                    vlc_reader->mem += 2;
-                    vlc_reader->register_bits += 16;
-                }
+                vlc_reader_load(vlc_reader);
 
                 /* Not see benefits to load an end in bytes.
                 while (vlc_reader->register_bits <= 56) {
@@ -102,33 +124,225 @@ static INLINE int8_t vlc_reader_get_next_value(vlc_reader_t* vlc_reader) {
             }
         }
         assert(vlc_reader->register_bits >= 32);
+    }
+    return reader;
+}
+
+static FORCE_INLINE int8_t vlc_reader_get_next_value(vlc_reader_t* vlc_reader) {
+    if (!(vlc_reader->register64 >> 32)) { //Because can not be more than 32 bits for test
+        *vlc_reader = vlc_reader_refill(*vlc_reader);
         if (!(vlc_reader->register64 >> 32)) { //Because can not be more than 32 bits for test
             return -1;
         }
     }
 
-    int8_t res = 32 - svt_log2_32(vlc_reader->register64 >> 32); //Possible values: 1-32
+    int8_t res = (int8_t)(clz32_nonzero((uint32_t)(vlc_reader->register64 >> 32)) + 1); //Possible values: 1-32
     vlc_reader->register_bits -= res;
     vlc_reader->bits_used += res;
     vlc_reader->register64 <<= res;
     return res - 1;
 }
 
-static void unpack_data_single_group(bitstream_reader_t* bitstream, uint16_t* buf, int32_t size, int8_t gtli) {
-    uint8_t val;
-    uint32_t tmp_buf[4] = {0};
-    for (int32_t bits = 0; bits < (size - 1); bits++) {
-        val = read_4_bits_align4(bitstream);
-        tmp_buf[3] = (tmp_buf[3] | (val & 1)) << 1;
-        tmp_buf[2] = (tmp_buf[2] | (val & 2)) << 1;
-        tmp_buf[1] = (tmp_buf[1] | (val & 4)) << 1;
-        tmp_buf[0] = (tmp_buf[0] | (val & 8)) << 1;
+/* Generated: for the next 8 register bits b (inverted, MSB first), the
+ * complete unary codes they contain. Code j: value in byte j of
+ * vlc_lut_values[b], end bit position (1..8) in nibble j of vlc_lut_ends[b]. */
+static const uint64_t vlc_lut_values[256] = {
+    0x0000000000000000ull, 0x0000000000000007ull, 0x0000000000000006ull, 0x0000000000000006ull,
+    0x0000000000000005ull, 0x0000000000000105ull, 0x0000000000000005ull, 0x0000000000000005ull,
+    0x0000000000000004ull, 0x0000000000000204ull, 0x0000000000000104ull, 0x0000000000000104ull,
+    0x0000000000000004ull, 0x0000000000010004ull, 0x0000000000000004ull, 0x0000000000000004ull,
+    0x0000000000000003ull, 0x0000000000000303ull, 0x0000000000000203ull, 0x0000000000000203ull,
+    0x0000000000000103ull, 0x0000000000010103ull, 0x0000000000000103ull, 0x0000000000000103ull,
+    0x0000000000000003ull, 0x0000000000020003ull, 0x0000000000010003ull, 0x0000000000010003ull,
+    0x0000000000000003ull, 0x0000000001000003ull, 0x0000000000000003ull, 0x0000000000000003ull,
+    0x0000000000000002ull, 0x0000000000000402ull, 0x0000000000000302ull, 0x0000000000000302ull,
+    0x0000000000000202ull, 0x0000000000010202ull, 0x0000000000000202ull, 0x0000000000000202ull,
+    0x0000000000000102ull, 0x0000000000020102ull, 0x0000000000010102ull, 0x0000000000010102ull,
+    0x0000000000000102ull, 0x0000000001000102ull, 0x0000000000000102ull, 0x0000000000000102ull,
+    0x0000000000000002ull, 0x0000000000030002ull, 0x0000000000020002ull, 0x0000000000020002ull,
+    0x0000000000010002ull, 0x0000000001010002ull, 0x0000000000010002ull, 0x0000000000010002ull,
+    0x0000000000000002ull, 0x0000000002000002ull, 0x0000000001000002ull, 0x0000000001000002ull,
+    0x0000000000000002ull, 0x0000000100000002ull, 0x0000000000000002ull, 0x0000000000000002ull,
+    0x0000000000000001ull, 0x0000000000000501ull, 0x0000000000000401ull, 0x0000000000000401ull,
+    0x0000000000000301ull, 0x0000000000010301ull, 0x0000000000000301ull, 0x0000000000000301ull,
+    0x0000000000000201ull, 0x0000000000020201ull, 0x0000000000010201ull, 0x0000000000010201ull,
+    0x0000000000000201ull, 0x0000000001000201ull, 0x0000000000000201ull, 0x0000000000000201ull,
+    0x0000000000000101ull, 0x0000000000030101ull, 0x0000000000020101ull, 0x0000000000020101ull,
+    0x0000000000010101ull, 0x0000000001010101ull, 0x0000000000010101ull, 0x0000000000010101ull,
+    0x0000000000000101ull, 0x0000000002000101ull, 0x0000000001000101ull, 0x0000000001000101ull,
+    0x0000000000000101ull, 0x0000000100000101ull, 0x0000000000000101ull, 0x0000000000000101ull,
+    0x0000000000000001ull, 0x0000000000040001ull, 0x0000000000030001ull, 0x0000000000030001ull,
+    0x0000000000020001ull, 0x0000000001020001ull, 0x0000000000020001ull, 0x0000000000020001ull,
+    0x0000000000010001ull, 0x0000000002010001ull, 0x0000000001010001ull, 0x0000000001010001ull,
+    0x0000000000010001ull, 0x0000000100010001ull, 0x0000000000010001ull, 0x0000000000010001ull,
+    0x0000000000000001ull, 0x0000000003000001ull, 0x0000000002000001ull, 0x0000000002000001ull,
+    0x0000000001000001ull, 0x0000000101000001ull, 0x0000000001000001ull, 0x0000000001000001ull,
+    0x0000000000000001ull, 0x0000000200000001ull, 0x0000000100000001ull, 0x0000000100000001ull,
+    0x0000000000000001ull, 0x0000010000000001ull, 0x0000000000000001ull, 0x0000000000000001ull,
+    0x0000000000000000ull, 0x0000000000000600ull, 0x0000000000000500ull, 0x0000000000000500ull,
+    0x0000000000000400ull, 0x0000000000010400ull, 0x0000000000000400ull, 0x0000000000000400ull,
+    0x0000000000000300ull, 0x0000000000020300ull, 0x0000000000010300ull, 0x0000000000010300ull,
+    0x0000000000000300ull, 0x0000000001000300ull, 0x0000000000000300ull, 0x0000000000000300ull,
+    0x0000000000000200ull, 0x0000000000030200ull, 0x0000000000020200ull, 0x0000000000020200ull,
+    0x0000000000010200ull, 0x0000000001010200ull, 0x0000000000010200ull, 0x0000000000010200ull,
+    0x0000000000000200ull, 0x0000000002000200ull, 0x0000000001000200ull, 0x0000000001000200ull,
+    0x0000000000000200ull, 0x0000000100000200ull, 0x0000000000000200ull, 0x0000000000000200ull,
+    0x0000000000000100ull, 0x0000000000040100ull, 0x0000000000030100ull, 0x0000000000030100ull,
+    0x0000000000020100ull, 0x0000000001020100ull, 0x0000000000020100ull, 0x0000000000020100ull,
+    0x0000000000010100ull, 0x0000000002010100ull, 0x0000000001010100ull, 0x0000000001010100ull,
+    0x0000000000010100ull, 0x0000000100010100ull, 0x0000000000010100ull, 0x0000000000010100ull,
+    0x0000000000000100ull, 0x0000000003000100ull, 0x0000000002000100ull, 0x0000000002000100ull,
+    0x0000000001000100ull, 0x0000000101000100ull, 0x0000000001000100ull, 0x0000000001000100ull,
+    0x0000000000000100ull, 0x0000000200000100ull, 0x0000000100000100ull, 0x0000000100000100ull,
+    0x0000000000000100ull, 0x0000010000000100ull, 0x0000000000000100ull, 0x0000000000000100ull,
+    0x0000000000000000ull, 0x0000000000050000ull, 0x0000000000040000ull, 0x0000000000040000ull,
+    0x0000000000030000ull, 0x0000000001030000ull, 0x0000000000030000ull, 0x0000000000030000ull,
+    0x0000000000020000ull, 0x0000000002020000ull, 0x0000000001020000ull, 0x0000000001020000ull,
+    0x0000000000020000ull, 0x0000000100020000ull, 0x0000000000020000ull, 0x0000000000020000ull,
+    0x0000000000010000ull, 0x0000000003010000ull, 0x0000000002010000ull, 0x0000000002010000ull,
+    0x0000000001010000ull, 0x0000000101010000ull, 0x0000000001010000ull, 0x0000000001010000ull,
+    0x0000000000010000ull, 0x0000000200010000ull, 0x0000000100010000ull, 0x0000000100010000ull,
+    0x0000000000010000ull, 0x0000010000010000ull, 0x0000000000010000ull, 0x0000000000010000ull,
+    0x0000000000000000ull, 0x0000000004000000ull, 0x0000000003000000ull, 0x0000000003000000ull,
+    0x0000000002000000ull, 0x0000000102000000ull, 0x0000000002000000ull, 0x0000000002000000ull,
+    0x0000000001000000ull, 0x0000000201000000ull, 0x0000000101000000ull, 0x0000000101000000ull,
+    0x0000000001000000ull, 0x0000010001000000ull, 0x0000000001000000ull, 0x0000000001000000ull,
+    0x0000000000000000ull, 0x0000000300000000ull, 0x0000000200000000ull, 0x0000000200000000ull,
+    0x0000000100000000ull, 0x0000010100000000ull, 0x0000000100000000ull, 0x0000000100000000ull,
+    0x0000000000000000ull, 0x0000020000000000ull, 0x0000010000000000ull, 0x0000010000000000ull,
+    0x0000000000000000ull, 0x0001000000000000ull, 0x0000000000000000ull, 0x0000000000000000ull,
+};
+static const uint32_t vlc_lut_ends[256] = {
+    0x00000000u, 0x00000008u, 0x00000007u, 0x00000087u, 0x00000006u, 0x00000086u, 0x00000076u, 0x00000876u,
+    0x00000005u, 0x00000085u, 0x00000075u, 0x00000875u, 0x00000065u, 0x00000865u, 0x00000765u, 0x00008765u,
+    0x00000004u, 0x00000084u, 0x00000074u, 0x00000874u, 0x00000064u, 0x00000864u, 0x00000764u, 0x00008764u,
+    0x00000054u, 0x00000854u, 0x00000754u, 0x00008754u, 0x00000654u, 0x00008654u, 0x00007654u, 0x00087654u,
+    0x00000003u, 0x00000083u, 0x00000073u, 0x00000873u, 0x00000063u, 0x00000863u, 0x00000763u, 0x00008763u,
+    0x00000053u, 0x00000853u, 0x00000753u, 0x00008753u, 0x00000653u, 0x00008653u, 0x00007653u, 0x00087653u,
+    0x00000043u, 0x00000843u, 0x00000743u, 0x00008743u, 0x00000643u, 0x00008643u, 0x00007643u, 0x00087643u,
+    0x00000543u, 0x00008543u, 0x00007543u, 0x00087543u, 0x00006543u, 0x00086543u, 0x00076543u, 0x00876543u,
+    0x00000002u, 0x00000082u, 0x00000072u, 0x00000872u, 0x00000062u, 0x00000862u, 0x00000762u, 0x00008762u,
+    0x00000052u, 0x00000852u, 0x00000752u, 0x00008752u, 0x00000652u, 0x00008652u, 0x00007652u, 0x00087652u,
+    0x00000042u, 0x00000842u, 0x00000742u, 0x00008742u, 0x00000642u, 0x00008642u, 0x00007642u, 0x00087642u,
+    0x00000542u, 0x00008542u, 0x00007542u, 0x00087542u, 0x00006542u, 0x00086542u, 0x00076542u, 0x00876542u,
+    0x00000032u, 0x00000832u, 0x00000732u, 0x00008732u, 0x00000632u, 0x00008632u, 0x00007632u, 0x00087632u,
+    0x00000532u, 0x00008532u, 0x00007532u, 0x00087532u, 0x00006532u, 0x00086532u, 0x00076532u, 0x00876532u,
+    0x00000432u, 0x00008432u, 0x00007432u, 0x00087432u, 0x00006432u, 0x00086432u, 0x00076432u, 0x00876432u,
+    0x00005432u, 0x00085432u, 0x00075432u, 0x00875432u, 0x00065432u, 0x00865432u, 0x00765432u, 0x08765432u,
+    0x00000001u, 0x00000081u, 0x00000071u, 0x00000871u, 0x00000061u, 0x00000861u, 0x00000761u, 0x00008761u,
+    0x00000051u, 0x00000851u, 0x00000751u, 0x00008751u, 0x00000651u, 0x00008651u, 0x00007651u, 0x00087651u,
+    0x00000041u, 0x00000841u, 0x00000741u, 0x00008741u, 0x00000641u, 0x00008641u, 0x00007641u, 0x00087641u,
+    0x00000541u, 0x00008541u, 0x00007541u, 0x00087541u, 0x00006541u, 0x00086541u, 0x00076541u, 0x00876541u,
+    0x00000031u, 0x00000831u, 0x00000731u, 0x00008731u, 0x00000631u, 0x00008631u, 0x00007631u, 0x00087631u,
+    0x00000531u, 0x00008531u, 0x00007531u, 0x00087531u, 0x00006531u, 0x00086531u, 0x00076531u, 0x00876531u,
+    0x00000431u, 0x00008431u, 0x00007431u, 0x00087431u, 0x00006431u, 0x00086431u, 0x00076431u, 0x00876431u,
+    0x00005431u, 0x00085431u, 0x00075431u, 0x00875431u, 0x00065431u, 0x00865431u, 0x00765431u, 0x08765431u,
+    0x00000021u, 0x00000821u, 0x00000721u, 0x00008721u, 0x00000621u, 0x00008621u, 0x00007621u, 0x00087621u,
+    0x00000521u, 0x00008521u, 0x00007521u, 0x00087521u, 0x00006521u, 0x00086521u, 0x00076521u, 0x00876521u,
+    0x00000421u, 0x00008421u, 0x00007421u, 0x00087421u, 0x00006421u, 0x00086421u, 0x00076421u, 0x00876421u,
+    0x00005421u, 0x00085421u, 0x00075421u, 0x00875421u, 0x00065421u, 0x00865421u, 0x00765421u, 0x08765421u,
+    0x00000321u, 0x00008321u, 0x00007321u, 0x00087321u, 0x00006321u, 0x00086321u, 0x00076321u, 0x00876321u,
+    0x00005321u, 0x00085321u, 0x00075321u, 0x00875321u, 0x00065321u, 0x00865321u, 0x00765321u, 0x08765321u,
+    0x00004321u, 0x00084321u, 0x00074321u, 0x00874321u, 0x00064321u, 0x00864321u, 0x00764321u, 0x08764321u,
+    0x00054321u, 0x00854321u, 0x00754321u, 0x08754321u, 0x00654321u, 0x08654321u, 0x07654321u, 0x87654321u,
+};
+static const uint8_t vlc_lut_count[256] = {
+    0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4,
+    1, 2, 2, 3, 2, 3, 3, 4, 2, 3, 3, 4, 3, 4, 4, 5,
+    1, 2, 2, 3, 2, 3, 3, 4, 2, 3, 3, 4, 3, 4, 4, 5,
+    2, 3, 3, 4, 3, 4, 4, 5, 3, 4, 4, 5, 4, 5, 5, 6,
+    1, 2, 2, 3, 2, 3, 3, 4, 2, 3, 3, 4, 3, 4, 4, 5,
+    2, 3, 3, 4, 3, 4, 4, 5, 3, 4, 4, 5, 4, 5, 5, 6,
+    2, 3, 3, 4, 3, 4, 4, 5, 3, 4, 4, 5, 4, 5, 5, 6,
+    3, 4, 4, 5, 4, 5, 5, 6, 4, 5, 5, 6, 5, 6, 6, 7,
+    1, 2, 2, 3, 2, 3, 3, 4, 2, 3, 3, 4, 3, 4, 4, 5,
+    2, 3, 3, 4, 3, 4, 4, 5, 3, 4, 4, 5, 4, 5, 5, 6,
+    2, 3, 3, 4, 3, 4, 4, 5, 3, 4, 4, 5, 4, 5, 5, 6,
+    3, 4, 4, 5, 4, 5, 5, 6, 4, 5, 5, 6, 5, 6, 6, 7,
+    2, 3, 3, 4, 3, 4, 4, 5, 3, 4, 4, 5, 4, 5, 5, 6,
+    3, 4, 4, 5, 4, 5, 5, 6, 4, 5, 5, 6, 5, 6, 6, 7,
+    3, 4, 4, 5, 4, 5, 5, 6, 4, 5, 5, 6, 5, 6, 6, 7,
+    4, 5, 5, 6, 5, 6, 6, 7, 5, 6, 6, 7, 6, 7, 7, 8,
+};
+
+/* Adds b to each of the 8 bytes of v (mod 256, no carries between bytes) and
+ * stores them to dst[0..7], byte 0 first. */
+static FORCE_INLINE void store_8_bytes_add(uint8_t* dst, uint64_t v, uint8_t b) {
+    const uint64_t add = 0x0101010101010101ull * b;
+    const uint64_t high = 0x8080808080808080ull;
+    const uint64_t sum = ((v & ~high) + (add & ~high)) ^ ((v ^ add) & high);
+    for (int j = 0; j < 8; j++) {
+        dst[j] = (uint8_t)(sum >> (8 * j));
     }
-    val = read_4_bits_align4(bitstream);
-    buf[3] = (uint16_t)(((tmp_buf[3] | (val & 1)) >> 0) << gtli);
-    buf[2] = (uint16_t)(((tmp_buf[2] | (val & 2)) >> 1) << gtli);
-    buf[1] = (uint16_t)(((tmp_buf[1] | (val & 4)) >> 2) << gtli);
-    buf[0] = (uint16_t)(((tmp_buf[0] | (val & 8)) >> 3) << gtli);
+}
+
+/* Decodes n VLC values into gclis[i] = gtli + value. Same results and reader
+ * state as n calls of vlc_reader_get_next_value(); returns the OR of the
+ * values (negative on error). Up to `writable` (>= n) bytes of gclis may be
+ * written; bytes past n get garbage that the caller overwrites later.
+ *
+ * Codes that end in the next 8 register bits are decoded several at a time
+ * with vlc_lut_*. That only consumes real bits (bits past the end of the
+ * data are zero and never end a code), so it is independent of when the
+ * register is refilled; everything else goes through
+ * vlc_reader_get_next_value(), which refills and reports errors. */
+static FORCE_INLINE int8_t vlc_reader_get_values(vlc_reader_t* vlc_reader, uint8_t* gclis, uint32_t n, uint32_t writable,
+                                                 uint8_t gtli) {
+    int8_t error = 0;
+    uint32_t i = 0;
+    while (i < n) {
+        /* Same load as vlc_reader_refill() when there is plenty of data left;
+         * the register always holds the next bits of the stream, so loading
+         * earlier doesn't change any result. */
+        if (vlc_reader->register_bits <= 32 && vlc_reader->bits_to_use >= vlc_reader->bits_used + 64) {
+            vlc_reader_load(vlc_reader);
+        }
+        if (i + 8 <= writable) {
+            const uint32_t top = (uint32_t)(vlc_reader->register64 >> 56);
+            uint32_t k = vlc_lut_count[top];
+            if (k) {
+                if (k > n - i) {
+                    k = n - i;
+                }
+                const uint32_t bits = (vlc_lut_ends[top] >> (4 * (k - 1))) & 0xF;
+                store_8_bytes_add(gclis + i, vlc_lut_values[top], gtli);
+                vlc_reader->register64 <<= bits;
+                vlc_reader->register_bits -= bits;
+                vlc_reader->bits_used += bits;
+                i += k;
+                continue;
+            }
+        }
+        const int8_t x = vlc_reader_get_next_value(vlc_reader);
+        error |= x;
+        gclis[i++] = (uint8_t)(gtli + x);
+    }
+    return error;
+}
+
+/* Reads `size` nibbles (one per bit plane, MSB plane first) and transposes
+ * them into the magnitudes of the group's 4 coefficients. The bitstream must
+ * be nibble-aligned (see read_4_bits_align4()). Walks the nibbles with a
+ * local index and updates the reader once. */
+static INLINE void unpack_data_single_group(bitstream_reader_t* bitstream, uint16_t* buf, int32_t size, int8_t gtli) {
+    assert((bitstream->bits_used == 0) || (bitstream->bits_used == 4));
+    const uint8_t* mem = bitstream->mem + bitstream->offset;
+    uint32_t nibble = bitstream->bits_used >> 2;
+    uint32_t c0 = 0, c1 = 0, c2 = 0, c3 = 0;
+    for (int32_t bits = 0; bits < size; bits++, nibble++) {
+        /* Even nibbles are the high half of a byte. */
+        const uint32_t val = (mem[nibble >> 1] >> ((~nibble & 1) << 2)) & 0xF;
+        c0 = (c0 << 1) | (val >> 3);
+        c1 = (c1 << 1) | ((val >> 2) & 1);
+        c2 = (c2 << 1) | ((val >> 1) & 1);
+        c3 = (c3 << 1) | (val & 1);
+    }
+    bitstream->offset += nibble >> 1;
+    bitstream->bits_used = (nibble & 1) << 2;
+    buf[0] = (uint16_t)(c0 << gtli);
+    buf[1] = (uint16_t)(c1 << gtli);
+    buf[2] = (uint16_t)(c2 << gtli);
+    buf[3] = (uint16_t)(c3 << gtli);
 }
 
 SvtJxsErrorType_t unpack_data_c(bitstream_reader_t* bitstream, uint16_t* buf, uint32_t w, uint8_t* gclis, uint32_t group_size,
@@ -442,11 +656,7 @@ SvtJxsErrorType_t unpack_pred_zero_gclis_no_significance(bitstream_reader_t* bit
     vlc_reader_t vlc_reader;
     vlc_reader_init(&vlc_reader, bitstream, *precinct_bits_left);
     int8_t error = 0;
-    for (uint32_t i = 0; i < gcli_width; i++) {
-        int8_t res = vlc_reader_get_next_value(&vlc_reader);
-        error |= res;
-        gclis[i] = gtli + res;
-    }
+    error |= vlc_reader_get_values(&vlc_reader, gclis, gcli_width, gcli_width, (uint8_t)gtli);
 
     /*Check only error at the end.*/
     if (error < 0) {
@@ -474,11 +684,9 @@ SvtJxsErrorType_t unpack_pred_zero_gclis_significance(bitstream_reader_t* bitstr
     for (uint32_t group_idx = 0; group_idx < group_num; group_idx++) {
         uint8_t significance_group_is_significant = !significances[0];
         if (significance_group_is_significant) {
-            for (uint8_t i = 0; i < SIGNIFICANCE_GROUP_SIZE; i++) {
-                int8_t res = vlc_reader_get_next_value(&vlc_reader);
-                error |= res;
-                gclis[i] = gtli + res;
-            }
+            /* Bytes past the group are rewritten by the next groups. */
+            error |= vlc_reader_get_values(
+                &vlc_reader, gclis, SIGNIFICANCE_GROUP_SIZE, gcli_width - group_idx * SIGNIFICANCE_GROUP_SIZE, (uint8_t)gtli);
         }
         else {
             memset(gclis, gtli, SIGNIFICANCE_GROUP_SIZE);
@@ -490,11 +698,7 @@ SvtJxsErrorType_t unpack_pred_zero_gclis_significance(bitstream_reader_t* bitstr
     if (leftover) {
         uint8_t significance_group_is_significant = !significances[0];
         if (significance_group_is_significant) {
-            for (uint8_t i = 0; i < leftover; i++) {
-                int8_t res = vlc_reader_get_next_value(&vlc_reader);
-                error |= res;
-                gclis[i] = gtli + res;
-            }
+            error |= vlc_reader_get_values(&vlc_reader, gclis, leftover, leftover, (uint8_t)gtli);
         }
         else {
             memset(gclis, gtli, leftover);

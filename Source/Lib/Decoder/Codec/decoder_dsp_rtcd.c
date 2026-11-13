@@ -19,6 +19,9 @@
 #include "Dequant_avx512.h"
 #ifdef __wasm_simd128__
 #include "Dequant_wasm_simd128.h"
+#include "UnPack_wasm_simd128.h"
+#include "Idwt_wasm_simd128.h"
+#include "NltDec_wasm_simd128.h"
 #endif
 
 /**************************************
@@ -107,26 +110,33 @@ void setup_decoder_rtcd_internal(CPU_FLAGS flags) {
     SET_SSE41_AVX2_AVX512(dequant, dequant_c, dequant_sse4_1, NULL, dequant_avx512);
     SET_WASM_SIMD128(dequant, dequant_wasm_simd128);
     SET_AVX2(linear_output_scaling_8bit, linear_output_scaling_8bit_c, linear_output_scaling_8bit_avx2);
+    SET_WASM_SIMD128(linear_output_scaling_8bit, linear_output_scaling_8bit_wasm_simd128);
     SET_AVX2_AVX512(linear_output_scaling_8bit_line,
                     linear_output_scaling_8bit_line_c,
                     linear_output_scaling_8bit_line_avx2,
                     linear_output_scaling_8bit_line_avx512);
+    SET_WASM_SIMD128(linear_output_scaling_8bit_line, linear_output_scaling_8bit_line_wasm_simd128);
     SET_AVX2(linear_output_scaling_16bit, linear_output_scaling_16bit_c, linear_output_scaling_16bit_avx2);
+    SET_WASM_SIMD128(linear_output_scaling_16bit, linear_output_scaling_16bit_wasm_simd128);
     SET_AVX2_AVX512(linear_output_scaling_16bit_line,
                     linear_output_scaling_16bit_line_c,
                     linear_output_scaling_16bit_line_avx2,
                     linear_output_scaling_16bit_line_avx512);
+    SET_WASM_SIMD128(linear_output_scaling_16bit_line, linear_output_scaling_16bit_line_wasm_simd128);
 
     SET_AVX2(inv_sign, inv_sign_c, inv_sign_avx2);
     SET_AVX2(unpack_data, unpack_data_c, unpack_data_avx2);
+    SET_WASM_SIMD128(unpack_data, unpack_data_wasm_simd128);
     SET_AVX2_AVX512(idwt_horizontal_line_lf16_hf16,
                     idwt_horizontal_line_lf16_hf16_c,
                     idwt_horizontal_line_lf16_hf16_avx2,
                     idwt_horizontal_line_lf16_hf16_avx512);
+    SET_WASM_SIMD128(idwt_horizontal_line_lf16_hf16, idwt_horizontal_line_lf16_hf16_wasm_simd128);
     SET_AVX2_AVX512(idwt_horizontal_line_lf32_hf16,
                     idwt_horizontal_line_lf32_hf16_c,
                     idwt_horizontal_line_lf32_hf16_avx2,
                     idwt_horizontal_line_lf32_hf16_avx512);
+    SET_WASM_SIMD128(idwt_horizontal_line_lf32_hf16, idwt_horizontal_line_lf32_hf16_wasm_simd128);
     SET_AVX2_AVX512(idwt_vertical_line, idwt_vertical_line_c, idwt_vertical_line_avx2, idwt_vertical_line_avx512);
     SET_AVX2_AVX512(
         idwt_vertical_line_recalc, idwt_vertical_line_recalc_c, idwt_vertical_line_recalc_avx2, idwt_vertical_line_recalc_avx512);

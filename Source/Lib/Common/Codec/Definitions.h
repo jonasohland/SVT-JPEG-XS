@@ -28,6 +28,17 @@ extern "C" {
 #define INLINE
 #endif
 
+#if defined(__GNUC__) || defined(__clang__)
+#define FORCE_INLINE inline __attribute__((always_inline))
+#define NOINLINE     __attribute__((noinline))
+#elif defined(_MSC_VER)
+#define FORCE_INLINE __forceinline
+#define NOINLINE     __declspec(noinline)
+#else
+#define FORCE_INLINE INLINE
+#define NOINLINE
+#endif
+
 #ifdef _WIN32
 #define FOPEN(f, s, m) fopen_s(&f, s, m)
 #else
