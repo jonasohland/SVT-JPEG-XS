@@ -43,7 +43,12 @@ CPU_FLAGS get_cpu_flags() {
 }
 #else
 CPU_FLAGS get_cpu_flags() {
+#ifdef __wasm_simd128__
+    /* Compiled with -msimd128: an engine without SIMD rejects the module. */
+    return CPU_FLAGS_WASM_SIMD128;
+#else
     return 0;
+#endif
 }
 #endif /*ARCH_X86_64*/
 

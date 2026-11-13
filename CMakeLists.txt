@@ -69,7 +69,7 @@ enable_language(ASM_NASM)
 add_definitions(-DARCH_X86_64=1)
 endif()
 
-# Object libraries holding the x86 SIMD kernels, linked by the library, apps and tests.
+# Object libraries holding the SIMD kernels, linked by the library, apps and tests.
 if(ENABLE_X86_ASM)
     set(SVT_COMMON_ASM_LIBS COMMON_ASM_SSE2 COMMON_ASM_AVX2)
     set(SVT_ENCODER_ASM_LIBS ENCODER_ASM_SSE2 ENCODER_ASM_SSE4_1 ENCODER_ASM_AVX2 ENCODER_ASM_AVX512)
@@ -80,6 +80,10 @@ else()
     set(SVT_ENCODER_ASM_LIBS "")
     set(SVT_DECODER_ASM_LIBS "")
     set(SVT_CPUINFO_LIB "")
+endif()
+# WebAssembly SIMD128 kernels (empty unless compiled with -msimd128).
+if(EMSCRIPTEN)
+    list(APPEND SVT_DECODER_ASM_LIBS DECODER_ASM_WASM_SIMD128)
 endif()
 
 # svt_install_app(<target>): install an app; under Emscripten also its .wasm

@@ -17,6 +17,9 @@
 #include "idwt-avx512.h"
 #include "NltDec_avx512.h"
 #include "Dequant_avx512.h"
+#ifdef __wasm_simd128__
+#include "Dequant_wasm_simd128.h"
+#endif
 
 /**************************************
  * Instruction Set Support
@@ -76,12 +79,23 @@
 #define SET_AVX2(ptr, c, avx2)                              SET_FUNCTIONS(ptr, c, 0, 0, 0, 0, 0, 0, 0, 0, avx2, 0)
 #define SET_AVX2_AVX512(ptr, c, avx2, avx512)               SET_FUNCTIONS(ptr, c, 0, 0, 0, 0, 0, 0, 0, 0, avx2, avx512)
 
+/* Overrides an entry set by SET_* above with a WebAssembly SIMD128 kernel. */
+#ifdef __wasm_simd128__
+#define SET_WASM_SIMD128(ptr, wasm_simd128)        \
+    do {                                           \
+        if (flags & CPU_FLAGS_WASM_SIMD128)        \
+            ptr = wasm_simd128;                    \
+    } while (0)
+#else
+#define SET_WASM_SIMD128(ptr, wasm_simd128)
+#endif
+
 void setup_decoder_rtcd_internal(CPU_FLAGS flags) {
     /* Avoid check that pointer is set double, after first  setup. */
     static uint8_t first_call_setup = 1;
     uint8_t check_pointer_was_set = first_call_setup;
     first_call_setup = 0;
-#ifdef ARCH_X86_64
+#if defined(ARCH_X86_64) || defined(__wasm_simd128__)
     /** Should be done during library initialization,
       but for safe limiting cpu flags again. */
     flags &= get_cpu_flags();
@@ -91,6 +105,7 @@ void setup_decoder_rtcd_internal(CPU_FLAGS flags) {
 #endif
 
     SET_SSE41_AVX2_AVX512(dequant, dequant_c, dequant_sse4_1, NULL, dequant_avx512);
+    SET_WASM_SIMD128(dequant, dequant_wasm_simd128);
     SET_AVX2(linear_output_scaling_8bit, linear_output_scaling_8bit_c, linear_output_scaling_8bit_avx2);
     SET_AVX2_AVX512(linear_output_scaling_8bit_line,
                     linear_output_scaling_8bit_line_c,
