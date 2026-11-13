@@ -34,4 +34,4 @@ if(UNIX)
         m)
 endif()
 
-install(TARGETS SvtJpegxsDecApp RUNTIME DESTINATION ${CMAKE_INSTALL_FULL_BINDIR})
+svt_install_app(SvtJpegxsDecApp)

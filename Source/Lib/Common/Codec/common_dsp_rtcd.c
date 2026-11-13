@@ -41,6 +41,10 @@ CPU_FLAGS get_cpu_flags() {
 
     return flags;
 }
+#else
+CPU_FLAGS get_cpu_flags() {
+    return 0;
+}
 #endif /*ARCH_X86_64*/
 
 #ifdef ARCH_X86_64

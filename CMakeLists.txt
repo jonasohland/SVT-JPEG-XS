@@ -29,6 +29,23 @@ endif()
 
 include(CheckCSourceCompiles)
 
+# x86 SIMD kernels (NASM + intrinsics) and cpuinfo-based runtime dispatch.
+# When disabled, only the portable C code paths are built (e.g. WebAssembly).
+if(EMSCRIPTEN)
+    set(ENABLE_X86_ASM_DEFAULT OFF)
+else()
+    set(ENABLE_X86_ASM_DEFAULT ON)
+endif()
+option(ENABLE_X86_ASM "Build x86 SIMD kernels (requires nasm/yasm)" ${ENABLE_X86_ASM_DEFAULT})
+message(STATUS "ENABLE_X86_ASM: ${ENABLE_X86_ASM}")
+
+if(EMSCRIPTEN)
+    # The codec always runs its pipeline stages on threads.
+    add_compile_options(-pthread)
+    add_link_options(-pthread)
+endif()
+
+if(ENABLE_X86_ASM)
 find_program(YASM_EXE yasm)
 option(ENABLE_NASM "Use nasm if available (Uses yasm by default if found)" OFF)
 if(YASM_EXE AND NOT CMAKE_ASM_NASM_COMPILER MATCHES "yasm" AND NOT ENABLE_NASM)
@@ -50,6 +67,38 @@ else()
 endif()
 enable_language(ASM_NASM)
 add_definitions(-DARCH_X86_64=1)
+endif()
+
+# Object libraries holding the x86 SIMD kernels, linked by the library, apps and tests.
+if(ENABLE_X86_ASM)
+    set(SVT_COMMON_ASM_LIBS COMMON_ASM_SSE2 COMMON_ASM_AVX2)
+    set(SVT_ENCODER_ASM_LIBS ENCODER_ASM_SSE2 ENCODER_ASM_SSE4_1 ENCODER_ASM_AVX2 ENCODER_ASM_AVX512)
+    set(SVT_DECODER_ASM_LIBS DECODER_ASM_SSE4_1 DECODER_ASM_AVX2 DECODER_ASM_AVX512)
+    set(SVT_CPUINFO_LIB cpuinfo_public)
+else()
+    set(SVT_COMMON_ASM_LIBS "")
+    set(SVT_ENCODER_ASM_LIBS "")
+    set(SVT_DECODER_ASM_LIBS "")
+    set(SVT_CPUINFO_LIB "")
+endif()
+
+# svt_install_app(<target>): install an app; under Emscripten also its .wasm
+# (CMake only knows about the .js loader).
+function(svt_install_app target)
+    install(TARGETS ${target} RUNTIME DESTINATION ${CMAKE_INSTALL_FULL_BINDIR})
+    if(EMSCRIPTEN)
+        install(FILES $<TARGET_FILE_DIR:${target}>/${target}.wasm DESTINATION ${CMAKE_INSTALL_FULL_BINDIR})
+    endif()
+endfunction()
+
+# svt_target_objects(<out_var> <object_lib>...): list of $<TARGET_OBJECTS:...>
+function(svt_target_objects out_var)
+    set(objs "")
+    foreach(lib ${ARGN})
+        list(APPEND objs "$<TARGET_OBJECTS:${lib}>")
+    endforeach()
+    set(${out_var} ${objs} PARENT_SCOPE)
+endfunction()
 
 include(GNUInstallDirs)
 include(CheckCCompilerFlag)
@@ -94,7 +143,13 @@ set(CMAKE_CXX_STANDARD 11)
 
 # BUILD_SHARED_LIBS is a standard CMake variable, but we declare it here to
 # make it prominent in the GUI.
-option(BUILD_SHARED_LIBS "Build shared libraries (DLLs)." ON)
+if(EMSCRIPTEN)
+    # Emscripten has no shared library support.
+    set(BUILD_SHARED_LIBS_DEFAULT OFF)
+else()
+    set(BUILD_SHARED_LIBS_DEFAULT ON)
+endif()
+option(BUILD_SHARED_LIBS "Build shared libraries (DLLs)." ${BUILD_SHARED_LIBS_DEFAULT})
 message(STATUS "BUILD_SHARED_LIBS: ${BUILD_SHARED_LIBS}")
 
 #option(BUILD_TESTING "Build SvtLcevcUnitTests, SvtLcevcApiTests, and SvtLcevcE2ETests unit tests")
@@ -114,7 +169,7 @@ if(UNIX)
         set(CMAKE_CXX_ARCHIVE_CREATE "<CMAKE_AR> Scr <TARGET> <LINK_FLAGS> <OBJECTS>")
         set(CMAKE_C_ARCHIVE_FINISH   "<CMAKE_RANLIB> -no_warning_for_no_symbols -c <TARGET>")
         set(CMAKE_CXX_ARCHIVE_FINISH "<CMAKE_RANLIB> -no_warning_for_no_symbols -c <TARGET>")
-    else()
+    elseif(NOT EMSCRIPTEN)
         set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -pie -z noexecstack -z relro -z now")
     endif()
 endif()
@@ -322,6 +377,16 @@ endif()
 add_subdirectory(Source/Lib)
 
 if(BUILD_APPS)
+    if(EMSCRIPTEN)
+        # Run the CLI apps under node: direct host file access, main() on a
+        # worker so it can block while the codec threads start up.
+        set(SVT_EMSCRIPTEN_APP_LINK_FLAGS
+            "-sNODERAWFS=1 -sPROXY_TO_PTHREAD=1 -sEXIT_RUNTIME=1 -sALLOW_MEMORY_GROWTH=1 -sSTACK_SIZE=1MB"
+            CACHE STRING "Extra link flags for the CLI apps under Emscripten")
+        # -Werror (from CMAKE_C_FLAGS) also turns emcc's link-time advisory
+        # about pthreads + memory growth into an error.
+        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wno-pthreads-mem-growth ${SVT_EMSCRIPTEN_APP_LINK_FLAGS}")
+    endif()
     add_subdirectory(Source/App/DecApp)
     add_subdirectory(Source/App/EncApp)
     add_subdirectory(Source/App/SampleEncoder)
@@ -329,6 +394,9 @@ if(BUILD_APPS)
 endif()
 
 if(BUILD_TESTING)
+    if(NOT ENABLE_X86_ASM)
+        message(FATAL_ERROR "The unit tests compare x86 SIMD kernels against C and require ENABLE_X86_ASM=ON")
+    endif()
     set(BUILD_SHARED_LIBS ON CACHE BOOL "" FORCE)
     set(BUILD_GMOCK OFF CACHE BOOL "" FORCE)
     set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
@@ -339,6 +407,8 @@ if(BUILD_TESTING)
     #enable_testing()
 endif()
 
-add_subdirectory(third_party/cpuinfo)
+if(ENABLE_X86_ASM)
+    add_subdirectory(third_party/cpuinfo)
+endif()
 
 install(DIRECTORY ${PROJECT_SOURCE_DIR}/Source/API/ DESTINATION "${CMAKE_INSTALL_FULL_INCLUDEDIR}/svt-jpegxs" FILES_MATCHING PATTERN "*.h")

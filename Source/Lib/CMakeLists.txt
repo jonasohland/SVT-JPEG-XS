@@ -12,17 +12,19 @@ set(SVT_LIB_VERSION_PATCH 0)
 set(SVT_LIB_VERSION ${SVT_LIB_VERSION_MAJOR}.${SVT_LIB_VERSION_MINOR}.${SVT_LIB_VERSION_PATCH})
 
 add_subdirectory(Common/Codec)
-add_subdirectory(Common/ASM_SSE2)
-add_subdirectory(Common/ASM_AVX2)
 add_subdirectory(Encoder/Codec)
-add_subdirectory(Encoder/ASM_SSE2)
-add_subdirectory(Encoder/ASM_SSE4_1)
-add_subdirectory(Encoder/ASM_AVX2)
-add_subdirectory(Encoder/ASM_AVX512)
 add_subdirectory(Decoder/Codec)
-add_subdirectory(Decoder/ASM_SSE4_1)
-add_subdirectory(Decoder/ASM_AVX2)
-add_subdirectory(Decoder/ASM_AVX512)
+if(ENABLE_X86_ASM)
+    add_subdirectory(Common/ASM_SSE2)
+    add_subdirectory(Common/ASM_AVX2)
+    add_subdirectory(Encoder/ASM_SSE2)
+    add_subdirectory(Encoder/ASM_SSE4_1)
+    add_subdirectory(Encoder/ASM_AVX2)
+    add_subdirectory(Encoder/ASM_AVX512)
+    add_subdirectory(Decoder/ASM_SSE4_1)
+    add_subdirectory(Decoder/ASM_AVX2)
+    add_subdirectory(Decoder/ASM_AVX512)
+endif()
 
 if(UNIX)
     if(NOT APPLE)
@@ -58,27 +60,20 @@ if (BUILD_SHARED_LIBS)
 endif()
 
 # Decoder Lib Source Files
-add_library(SvtJpegxsLib
-    $<TARGET_OBJECTS:COMMON_CODEC>
-    $<TARGET_OBJECTS:COMMON_ASM_AVX2>
-    $<TARGET_OBJECTS:COMMON_ASM_SSE2>
-    $<TARGET_OBJECTS:ENCODER_CODEC>
-    $<TARGET_OBJECTS:ENCODER_ASM_SSE2>
-    $<TARGET_OBJECTS:ENCODER_ASM_SSE4_1>
-    $<TARGET_OBJECTS:ENCODER_ASM_AVX2>
-    $<TARGET_OBJECTS:ENCODER_ASM_AVX512>
-    $<TARGET_OBJECTS:DECODER_CODEC>
-    $<TARGET_OBJECTS:DECODER_ASM_AVX512>
-    $<TARGET_OBJECTS:DECODER_ASM_AVX2>
-    $<TARGET_OBJECTS:DECODER_ASM_SSE4_1>
-    )
+svt_target_objects(svt_lib_objects
+    COMMON_CODEC ${SVT_COMMON_ASM_LIBS}
+    ENCODER_CODEC ${SVT_ENCODER_ASM_LIBS}
+    DECODER_CODEC ${SVT_DECODER_ASM_LIBS})
+add_library(SvtJpegxsLib ${svt_lib_objects})
 
 set_target_properties(SvtJpegxsLib PROPERTIES OUTPUT_NAME "SvtJpegxs")
 set_target_properties(SvtJpegxsLib PROPERTIES VERSION ${SVT_LIB_VERSION})
 set_target_properties(SvtJpegxsLib PROPERTIES SOVERSION ${SVT_LIB_VERSION_MAJOR})
 set_target_properties(SvtJpegxsLib PROPERTIES C_VISIBILITY_PRESET hidden)
 target_link_libraries(SvtJpegxsLib PUBLIC ${PLATFORM_LIBS})
-target_link_libraries(SvtJpegxsLib PRIVATE cpuinfo_public)
+if(ENABLE_X86_ASM)
+    target_link_libraries(SvtJpegxsLib PRIVATE ${SVT_CPUINFO_LIB})
+endif()
 
 set(LIB_PKG_CONFIG_EXTRA_CFLAGS "")
 if (BUILD_SHARED_LIBS)
