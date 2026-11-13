@@ -5,6 +5,7 @@
 
 #include "Dequant.h"
 #include "Codestream.h"
+#include "Definitions.h"
 
 void inv_quant_deadzone(uint16_t* buf, uint32_t size, uint8_t* gclis, uint32_t group_size, uint8_t gtli) {
     if (gtli == 0) {
@@ -48,6 +49,11 @@ void dequant_c(uint16_t* buf, uint32_t size, uint8_t* gclis, uint32_t group_size
         inv_quant_uniform(buf, size, gclis, group_size, gtli);
         return;
     case QUANT_TYPE_DEADZONE:
+        // A compile-time group size lets the loop vectorize.
+        if (group_size == GROUP_SIZE) {
+            inv_quant_deadzone(buf, size, gclis, GROUP_SIZE, gtli);
+            return;
+        }
         inv_quant_deadzone(buf, size, gclis, group_size, gtli);
         return;
     default:

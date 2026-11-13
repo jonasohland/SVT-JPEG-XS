@@ -55,6 +55,13 @@ SvtJxsErrorType_t universal_thread_context_ctor(ThreadContext_t* thread_context_
     return SvtJxsErrorNone;
 }
 
+/* Called through a volatile pointer so that it can't be inlined into the
+ * endless loop below. V8 has no on-stack replacement for wasm: a function that
+ * is entered once and never returns keeps running as baseline (Liftoff) code. */
+static SvtJxsErrorType_t (*volatile decode_slice_fn)(svt_jpeg_xs_decoder_instance_t*, svt_jpeg_xs_decoder_thread_context*,
+                                                     const uint8_t*, size_t, uint32_t, uint32_t*,
+                                                     svt_jpeg_xs_image_buffer_t*, uint32_t) = svt_jpeg_xs_decode_slice;
+
 void* thread_universal_stage_kernel(void* input_ptr) {
     ThreadContext_t* thread_ctx = (ThreadContext_t*)input_ptr;
     UniversalThreadContext* universal_ctx = (UniversalThreadContext*)thread_ctx->priv;
@@ -84,14 +91,14 @@ void* thread_universal_stage_kernel(void* input_ptr) {
         /*Check that other slice or header did not have error while decoding.*/
         if (input_buffer_ptr->frame_error == 0) {
             uint32_t out_slice_size;
-            ret_decode = svt_jpeg_xs_decode_slice(dec_ctx,
-                                                  dec_thread_context,
-                                                  input_buffer_ptr->bitstream_buf,
-                                                  input_buffer_ptr->bitstream_buf_size,
-                                                  input_buffer_ptr->slice_id,
-                                                  &out_slice_size,
-                                                  &input_buffer_ptr->image_buffer,
-                                                  dec_api_prv->verbose);
+            ret_decode = decode_slice_fn(dec_ctx,
+                                         dec_thread_context,
+                                         input_buffer_ptr->bitstream_buf,
+                                         input_buffer_ptr->bitstream_buf_size,
+                                         input_buffer_ptr->slice_id,
+                                         &out_slice_size,
+                                         &input_buffer_ptr->image_buffer,
+                                         dec_api_prv->verbose);
             if (ret_decode < 0) {
                 input_buffer_ptr->frame_error = ret_decode;
             }
